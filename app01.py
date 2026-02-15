@@ -1,294 +1,138 @@
 import streamlit as st
 import os
 from langchain_groq import ChatGroq
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.chains import ConversationalRetrievalChain
-from langchain.memory import ConversationBufferMemory
+from langchain_core.runnables import RunnablePassthrough
+from langchain_community.document_loaders import PyMuPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
 
-# Configuración de página
-st.set_page_config(
-    page_title="AI Business App - Marketing & Customer Service",
-    page_icon="🤖",
-    layout="wide"
-)
+# Configuración de la página
+st.set_page_config(page_title="IA Business & Support Tool", layout="wide")
 
-# CSS personalizado
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .sub-header {
-        font-size: 1.5rem;
-        color: #ff7f0e;
-        margin-bottom: 1rem;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        background-color: #f0f2f6;
-        border-radius: 4px 4px 0 0;
-        padding: 10px 20px;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #1f77b4;
-        color: white;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# --- BARRA LATERAL: Configuración ---
+st.sidebar.title("Configuración")
+api_key = st.sidebar.text_input("Introduce tu Groq API Key:", type="password")
 
-# Título principal
-st.markdown('<h1 class="main-header">🤖 AI Business Application</h1>', unsafe_allow_html=True)
+if not api_key:
+    st.info("Por favor, introduce tu API Key de Groq en la barra lateral para comenzar.")
+    st.stop()
 
-# Sidebar para API Key
-with st.sidebar:
-    st.markdown("### 🔑 Configuración")
-    api_key = st.text_input(
-        "Groq API Key",
-        type="password",
-        placeholder="Ingresa tu API key de Groq",
-        help="Obtén tu API key en https://console.groq.com"
-    )
-    
-    if api_key:
-        os.environ["GROQ_API_KEY"] = api_key
-        st.success("✅ API Key configurada")
-    else:
-        st.warning("⚠️ Por favor ingresa tu API Key")
-    
-    st.markdown("---")
-    st.markdown("### 📚 Información")
-    st.info("""
-    **Marketing Content Generator**: Crea contenido optimizado para diferentes plataformas.
-    
-    **Customer Service**: Chatbot basado en el manual de SafeBank.
-    """)
+os.environ["GROQ_API_KEY"] = api_key
 
-# Inicializar LLM
-@st.cache_resource
-def init_llm(api_key):
-    if not api_key:
-        return None
+# --- CARGA DE MODELO LLM ---
+def get_llm():
     return ChatGroq(
         model="llama-3.3-70b-versatile",
-        temperature=0.7,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-        api_key=api_key
+        temperature=0.7
     )
 
-# Función de generación para marketing
-def generate_marketing_content(llm, prompt):
-    template = ChatPromptTemplate.from_messages([
-        ("system", "You are a digital marketing expert specialized in SEO and persuasive copywriting."),
-        ("human", "{prompt}"),
-    ])
-    
-    chain = template | llm | StrOutputParser()
-    res = chain.invoke({"prompt": prompt})
-    return res
+llm = get_llm()
 
-# Función para cargar y procesar PDF
+# --- LÓGICA RAG (Atención al Cliente) ---
 @st.cache_resource
-def load_pdf_knowledge(_llm):
-    # Cargar PDF
-    loader = PyPDFLoader("safebank-manual.pdf")
-    documents = loader.load()
+def prepare_rag_system(file_path):
+    # 1. Cargar PDF
+    loader = PyMuPDFLoader(file_path)
+    docs = loader.load()
     
-    # Dividir en chunks
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    texts = text_splitter.split_documents(documents)
+    # 2. Dividir texto
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    chunks = text_splitter.split_documents(docs)
     
-    # Crear embeddings y vectorstore
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    )
-    vectorstore = FAISS.from_documents(texts, embeddings)
-    
-    # Crear cadena conversacional
-    memory = ConversationBufferMemory(
-        memory_key="chat_history",
-        return_messages=True,
-        output_key="answer"
-    )
-    
-    qa_chain = ConversationalRetrievalChain.from_llm(
-        llm=_llm,
-        retriever=vectorstore.as_retriever(search_kwargs={"k": 3}),
-        memory=memory,
-        return_source_documents=True
-    )
-    
-    return qa_chain
+    # 3. Crear Embeddings e Indexar en FAISS
+    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-large-en-v1.5")
+    vectorstore = FAISS.from_documents(chunks, embedding=embeddings)
+    return vectorstore.as_retriever(search_kwargs={"k": 5})
 
-# Tabs principales
-tab1, tab2 = st.tabs(["📢 Marketing Content Generator", "💬 Customer Service Bot"])
+# --- INTERFAZ PRINCIPAL ---
+st.title("🤖 IA para Marketing y Atención al Cliente")
+tab1, tab2 = st.tabs(["📢 Generador de Marketing", "🎧 Atención al Cliente (RAG)"])
 
-# TAB 1: Marketing Content Generator
+# --- TAB 1: GENERADOR DE MARKETING ---
 with tab1:
-    st.markdown('<h2 class="sub-header">Generador de Contenido para Marketing</h2>', unsafe_allow_html=True)
+    st.header("Generación de Contenido SEO")
     
-    if not api_key:
-        st.warning("⚠️ Por favor configura tu API Key en el panel lateral para usar esta funcionalidad.")
-    else:
-        llm = init_llm(api_key)
-        
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            topic = st.text_input(
-                "📝 Tema del contenido:",
-                placeholder="ej: nutrición, salud mental, tecnología, fitness...",
-                help="El tema principal sobre el que quieres crear contenido"
-            )
-        
-        with col2:
-            platform = st.selectbox(
-                "📱 Plataforma:",
-                ['Instagram', 'Facebook', 'LinkedIn', 'Blog', 'Email']
-            )
-        
-        col3, col4, col5 = st.columns(3)
-        
-        with col3:
-            tone = st.selectbox(
-                "🎭 Tono del mensaje:",
-                ['Normal', 'Informativo', 'Inspirador', 'Urgente', 'Informal']
-            )
-        
-        with col4:
-            length = st.selectbox(
-                "📏 Longitud:",
-                ['Corto', 'Medio', 'Largo']
-            )
-        
-        with col5:
-            audience = st.selectbox(
-                "👥 Audiencia:",
-                ['Todos', 'Jóvenes adultos', 'Familias', 'Adultos mayores', 'Adolescentes']
-            )
-        
-        col6, col7 = st.columns(2)
-        
-        with col6:
-            cta = st.checkbox("✅ Incluir CTA (Call to Action)")
-        
-        with col7:
-            hashtags = st.checkbox("🏷️ Incluir Hashtags")
-        
-        keywords = st.text_area(
-            "🔍 Keywords (SEO):",
-            placeholder="Ejemplo: bienestar, salud preventiva, tecnología innovadora...",
-            help="Palabras clave para optimización SEO"
-        )
-        
-        if st.button("🚀 Generar Contenido", type="primary", use_container_width=True):
-            if not topic:
-                st.error("❌ Por favor ingresa un tema para generar contenido.")
-            else:
-                with st.spinner("⏳ Generando contenido..."):
-                    prompt = f"""
-                    Escribe un texto optimizado para SEO sobre el tema '{topic}'.
-                    Devuelve solo el texto final en tu respuesta sin comillas.
-                    - Plataforma donde se publicará: {platform}.
-                    - Tono: {tone}.
-                    - Audiencia objetivo: {audience}.
-                    - Longitud: {length}.
-                    - {"Incluye un Call to Action claro." if cta else "No incluyas Call to Action."}
-                    - {"Incluye hashtags relevantes al final del texto." if hashtags else "No incluyas hashtags."}
-                    {"- Keywords a incluir (para SEO): " + keywords if keywords else ""}
-                    """
-                    try:
-                        result = generate_marketing_content(llm, prompt)
-                        st.markdown("### 📄 Contenido Generado:")
-                        st.markdown(f"```\n{result}\n```")
-                        st.success("✅ ¡Contenido generado exitosamente!")
-                        
-                        # Botón de copiar
-                        st.download_button(
-                            label="📥 Descargar como TXT",
-                            data=result,
-                            file_name=f"contenido_{platform.lower()}_{topic.replace(' ', '_')}.txt",
-                            mime="text/plain"
-                        )
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
+    col1, col2 = st.columns(2)
+    with col1:
+        topic = st.text_input("Tema del contenido:", placeholder="Ej: Nutrición deportiva")
+        platform = st.selectbox("Plataforma:", ['Instagram', 'Facebook', 'LinkedIn', 'Blog', 'Email'])
+        tone = st.selectbox("Tono:", ['Normal', 'Informativo', 'Inspirador', 'Urgente', 'Informal'])
+    
+    with col2:
+        length = st.selectbox("Longitud:", ['Short', 'Medium', 'Long', '1 paragraph'])
+        audience = st.selectbox("Audiencia Objetivo:", ['All', 'Young adults', 'Families', 'Seniors', 'Teenagers'])
+        keywords = st.text_area("Keywords (SEO):", placeholder="Ej: fitness, salud, dieta...")
 
-# TAB 2: Customer Service Bot
-with tab2:
-    st.markdown('<h2 class="sub-header">Chatbot de Atención al Cliente - SafeBank</h2>', unsafe_allow_html=True)
-    
-    if not api_key:
-        st.warning("⚠️ Por favor configura tu API Key en el panel lateral para usar esta funcionalidad.")
-    else:
-        # Verificar si existe el PDF
-        pdf_path = "safebank-manual.pdf"
-        if not os.path.exists(pdf_path):
-            st.error(f"❌ No se encontró el archivo '{pdf_path}'. Por favor asegúrate de que esté en el mismo directorio que app.py")
+    c_col1, c_col2 = st.columns(2)
+    with c_col1:
+        cta = st.checkbox("Incluir Call to Action (CTA)")
+    with c_col2:
+        hashtags = st.checkbox("Incluir Hashtags")
+
+    if st.button("Generar Contenido de Marketing"):
+        if not topic:
+            st.warning("Por favor, introduce un tema.")
         else:
-            llm = init_llm(api_key)
+            marketing_prompt = f"""
+            Write an SEO-optimized text on the topic '{topic}'.
+            Return only the final text in your response and don't put it inside quotes.
+            - Platform where it will be published: {platform}.
+            - Tone: {tone}.
+            - Target audience: {audience}.
+            - Length: {length}.
+            - {"Include a clear Call to Action." if cta else "Do not include a Call to Action."}
+            - {"Include relevant hashtags at the end of the text." if hashtags else "Do not include hashtags."}
+            {"- Keywords to include (for SEO): " + keywords if keywords else ""}
+            """
             
-            # Inicializar chat history
-            if "messages" not in st.session_state:
-                st.session_state.messages = []
+            template = ChatPromptTemplate.from_messages([
+                ("system", "You are a digital marketing expert specialized in SEO and persuasive copywriting."),
+                ("human", "{prompt}")
+            ])
             
-            # Cargar conocimiento del PDF
-            try:
-                with st.spinner("📚 Cargando base de conocimiento de SafeBank..."):
-                    qa_chain = load_pdf_knowledge(llm)
-                
-                st.success("✅ Base de conocimiento cargada correctamente")
-                
-                # Mostrar historial de chat
-                for message in st.session_state.messages:
-                    with st.chat_message(message["role"]):
-                        st.markdown(message["content"])
-                
-                # Input del usuario
-                if prompt := st.chat_input("Escribe tu pregunta sobre SafeBank..."):
-                    # Agregar mensaje del usuario
-                    st.session_state.messages.append({"role": "user", "content": prompt})
-                    with st.chat_message("user"):
-                        st.markdown(prompt)
-                    
-                    # Generar respuesta
-                    with st.chat_message("assistant"):
-                        with st.spinner("🤔 Pensando..."):
-                            response = qa_chain({"question": prompt})
-                            answer = response["answer"]
-                            st.markdown(answer)
-                    
-                    # Agregar respuesta al historial
-                    st.session_state.messages.append({"role": "assistant", "content": answer})
-                
-                # Botón para limpiar chat
-                if st.button("🗑️ Limpiar conversación"):
-                    st.session_state.messages = []
-                    st.rerun()
-                    
-            except Exception as e:
-                st.error(f"❌ Error al cargar el PDF: {str(e)}")
-                st.info("💡 Asegúrate de tener instaladas todas las dependencias necesarias.")
+            chain = template | llm | StrOutputParser()
+            
+            with st.spinner("Generando..."):
+                result = chain.invoke({"prompt": marketing_prompt})
+                st.markdown("### Resultado:")
+                st.write(result)
 
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666;'>
-    <p>Desarrollado con ❤️ usando Streamlit y Groq | © 2026</p>
-</div>
-""", unsafe_allow_html=True)
+# --- TAB 2: ATENCIÓN AL CLIENTE (RAG) ---
+with tab2:
+    st.header("Asistente Virtual SafeBank")
+    st.write("Haz preguntas sobre el manual de SafeBank.")
+
+    # El archivo PDF debe estar en la misma carpeta que app.py en GitHub
+    pdf_path = "safebank-manual.pdf"
+    
+    if not os.path.exists(pdf_path):
+        st.error(f"Archivo {pdf_path} no encontrado. Asegúrate de subirlo a tu repositorio.")
+    else:
+        retriever = prepare_rag_system(pdf_path)
+        
+        user_question = st.text_input("Escribe tu duda aquí:")
+        
+        if user_question:
+            system_prompt = """You are a helpful virtual assistant answering general questions about a company's services.
+            Use the following bits of retrieved context to answer the question.
+            If you don't know the answer, just say you don't know. Keep your answer concise. \n\n Context: {context}"""
+
+            qa_prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                ("human", "Question: {input}"),
+            ])
+
+            rag_chain = (
+                {"context": retriever, "input": RunnablePassthrough()}
+                | qa_prompt
+                | llm
+                | StrOutputParser()
+            )
+
+            with st.spinner("Buscando en el manual..."):
+                response = rag_chain.invoke(user_question)
+                st.markdown("### Respuesta del Asistente:")
+                st.write(response)
